@@ -15,6 +15,7 @@
                  @jump="jumpContent"
                  @refresh-before="refreshBefore"
                  @right-search="rightSearch"
+                 :highlight-text="appliedSearchText"
                  :type="'all-email'"
 
     >
@@ -165,6 +166,8 @@ function closedClear() {
   clearTime.value = null
 }
 
+const appliedSearchText = computed(() => params.name || params.subject || params.userEmail || params.accountEmail || '')
+
 const selectTitle = computed(() => {
   if (params.searchType === 'user') return t('user')
   if (params.searchType === 'account') return t('selectEmail')
@@ -282,16 +285,16 @@ function typeSelectChange() {
 }
 
 function jumpContent(email) {
-  emailStore.contentData.email = email
+  emailStore.contentData.email = emailStore.toContentEmail(email)
   emailStore.contentData.delType = 'physics'
   emailStore.contentData.showStar = false
   emailStore.contentData.showReply = false
-  router.push({name: 'content'})
+  router.push({name: 'content', params: {mailbox: 'all-mail'}})
 }
 
 
 function getEmailList(emailId, size) {
-  return allEmailList({emailId, size, ...params})
+  return emailStore.fetchList(full => allEmailList({emailId, size, full, ...params}))
 }
 
 async function latest() {
@@ -338,6 +341,8 @@ async function latest() {
       if (params.timeSort !== curTimeSort) {
         continue
       }
+
+      emailStore.applyFullList(list)
 
       for (let email of list) {
 
