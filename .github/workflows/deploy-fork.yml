@@ -1,3 +1,5 @@
+# fork 自有部署工作流（替代上游的 deploy-cloudflare.yml，避免上游改动引发冲突）
+# 与上游的差异见 doc/fork-maintenance.md
 name: 🚀 Deploy cloud-mail to Cloudflare Workers
 
 on:
@@ -6,7 +8,7 @@ on:
     paths:
       - "mail-worker/**"
       - "mail-vue/**"
-      - ".github/workflows/deploy-cloudflare.yml"
+      - ".github/workflows/deploy-fork.yml"
   workflow_dispatch:
 
 jobs:

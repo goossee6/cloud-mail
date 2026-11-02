@@ -288,7 +288,7 @@ Notification channels are configured through the web interface after deployment,
 
 ### GitHub Action Deployment
 
-See [.github/workflows/deploy-cloudflare.yml](.github/workflows/deploy-cloudflare.yml)
+See [.github/workflows/deploy-fork.yml](.github/workflows/deploy-fork.yml)
 
 ## Sponsor
 

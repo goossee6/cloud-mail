@@ -9,7 +9,6 @@ import { emailConst, isDel, settingConst } from '../const/entity-const';
 import emailUtils from '../utils/email-utils';
 import roleService from '../service/role-service';
 import userService from '../service/user-service';
-import telegramService from '../service/telegram-service';
 import aiService from '../service/ai-service';
 import { dispatchNotification } from '../plugins/notification/index.js';
 import webhookService from '../service/webhook-service';
@@ -172,13 +171,9 @@ export async function email(message, env, ctx) {
 
 		}
 
-		//转发到TG (旧版，已弃用)
-		if (tgBotStatus === settingConst.tgBotStatus.OPEN && tgChatId) {
-			await telegramService.sendEmailToBot({ env }, emailRow)
-		}
-
-		//新通知系统 (notify_rule)
-		ctx.waitUntil(dispatchNotification(env, emailRow).catch(e => console.error('[Notification] dispatch error:', e.message)));
+		//通知系统（新规则 + 旧版 TG Bot 兼容，统一在插件内分发）
+		ctx.waitUntil(dispatchNotification(env, emailRow, { tgBotStatus, tgChatId })
+			.catch(e => console.error('[Notification] dispatch error:', e.message)));
 
 		//转发到其他邮箱
 		if (forwardStatus === settingConst.forwardStatus.OPEN && forwardEmail) {

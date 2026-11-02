@@ -1,6 +1,6 @@
 # 部署指南（GitHub Actions）
 
-本文按官方文档 [Github Actions 部署](https://docs.skymail.ink/deployment/action.html) 编写，步骤、变量名、工作流都与上游一致。部署由仓库里的 `.github/workflows/deploy-cloudflare.yml` 完成：它读取 GitHub 上的变量 → 替换 `mail-worker/wrangler-action.toml` 里的 `${...}` → `wrangler deploy` → 自动调 `/api/init` 初始化数据库。
+本文按官方文档 [Github Actions 部署](https://docs.skymail.ink/deployment/action.html) 编写，步骤、变量名、工作流都与上游一致。部署由仓库里的 `.github/workflows/deploy-fork.yml` 完成：它读取 GitHub 上的变量 → 替换 `mail-worker/wrangler-action.toml` 里的 `${...}` → `wrangler deploy` → 自动调 `/api/init` 初始化数据库。
 
 **本仓库改了三处**：触发分支从 `main` 改成 `patched`；`wrangler-action.toml` 里**不声明任何路由**；`jwt_secret` 改为**加密 secret**（不再是明文变量）。（详见文末「与官方文档的差异」）其余全部沿用上游：变量名、部署命令、自动初始化数据库。
 

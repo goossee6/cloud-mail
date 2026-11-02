@@ -27,3 +27,6 @@ mail-vue/dist
 .venv
 git-tools.js
 .workbuddy/
+
+# 本地真实部署配置（含 D1/KV ID、域名、管理员邮箱），不入库
+mail-worker/wrangler.local.toml

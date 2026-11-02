@@ -293,7 +293,9 @@ TIMEZONE = "Asia/Shanghai"            # 通知时间戳时区
 
 ### GitHub Action 部署
 
-详见 [.github/workflows/deploy-cloudflare.yml](.github/workflows/deploy-cloudflare.yml)
+详见 [.github/workflows/deploy-fork.yml](.github/workflows/deploy-fork.yml)
+
+> 本仓库是上游的 fork，自有功能的目录约定、与上游的差异清单、同步上游的步骤见 [doc/fork-maintenance.md](doc/fork-maintenance.md)。
 
 ## 赞助
 
