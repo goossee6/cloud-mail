@@ -5,10 +5,6 @@ compatibility_date = "2025-06-04"
 [observability]
 enabled = true
 
-[[routes]]
-pattern = "${CUSTOM_DOMAIN}"
-custom_domain = true
-
 [[d1_databases]]
 binding = "db"
 database_name = "cloud-mail"
@@ -44,7 +40,8 @@ analysis_cache = "${ANALYSIS_CACHE}"
 #orm_log = false
 domain = "${DOMAIN}"
 admin = "${ADMIN}"
-jwt_secret = "${JWT_SECRET}"
+#jwt_secret 不放这里：部署后由工作流执行 wrangler secret put 写成加密 secret；
+#放 [vars] 会变成明文变量（控制台可直接读值，构建日志也会打印）
 project_link = "${PROJECT_LINK}"
 
 [build]

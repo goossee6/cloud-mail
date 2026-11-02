@@ -6,12 +6,16 @@ on:
     paths:
       - "mail-worker/**"
       - "mail-vue/**"
+      - ".github/workflows/deploy-cloudflare.yml"
   workflow_dispatch:
 
 jobs:
   Deploy-cloud-mail:
     name: 🏗️ Build and Deploy
     runs-on: ubuntu-latest
+    permissions:
+      actions: write   # 末尾「删除运行记录」步骤需要
+      contents: read
 
     env:
       NAME: ${{ secrets.NAME || vars.NAME || 'cloud-mail' }}
@@ -28,6 +32,8 @@ jobs:
       AI_MODEL: ${{ secrets.AI_MODEL || vars.AI_MODEL || '@cf/meta/llama-3.1-8b-instruct-fast' }}
       EMAIL: ${{ secrets.EMAIL || vars.EMAIL }}
       ANALYSIS_CACHE: ${{ secrets.ANALYSIS_CACHE || vars.ANALYSIS_CACHE || false }}
+      AI_BINDING: ${{ secrets.AI_BINDING || vars.AI_BINDING || 'true' }}
+      AI_FAILOVER: ${{ secrets.AI_FAILOVER || vars.AI_FAILOVER || 'true' }}
 
 
     outputs:
@@ -95,8 +101,21 @@ jobs:
 
           CONFIG_FILE="wrangler-action.toml"
 
+          # AI_MODEL 写成 @//cf/... 时模型调用会失败，这里统一纠正成 @cf/...
+          NORMALIZED_AI_MODEL=$(echo "$AI_MODEL" | sed -E 's#^@/*#@#')
+          if [ "$NORMALIZED_AI_MODEL" != "$AI_MODEL" ]; then
+            echo "::warning::AI_MODEL 格式异常（$AI_MODEL），已按 $NORMALIZED_AI_MODEL 部署，建议顺手改掉这个变量"
+            AI_MODEL="$NORMALIZED_AI_MODEL"
+          fi
+
           if [ -z "$R2_BUCKET_NAME" ]; then
             sed -i '/\[\[r2_buckets\]\]/,/^$/d' "$CONFIG_FILE"
+          fi
+
+          # AI_BINDING=false 时跳过 Workers AI 绑定：CF 侧生成 binding 报 10021 时可用它让部署先通过
+          if [ "$AI_BINDING" = "false" ]; then
+            sed -i '/^\[ai\]/,/^$/d' "$CONFIG_FILE"
+            echo "::warning::AI_BINDING=false —— 已跳过 Workers AI 绑定，部署后 AI 邮件分析 / 验证码自动提取不可用"
           fi
 
           if [ -z "$PROJECT_LINK" ]; then
@@ -119,7 +138,7 @@ jobs:
           sed -i "s|\${CUSTOM_DOMAIN}|${CUSTOM_DOMAIN}|g" "$CONFIG_FILE"
           sed -i "s|\"\${DOMAIN}\"|${DOMAIN}|g" "$CONFIG_FILE"
           sed -i "s|\${ADMIN}|${ADMIN}|g" "$CONFIG_FILE"
-          sed -i "s|\${JWT_SECRET}|${JWT_SECRET}|g" "$CONFIG_FILE"
+          # jwt_secret 不在 [vars] 里：部署后由「🔐 写入 JWT 密钥」步骤以加密 secret 写入
           sed -i "s|\${R2_BUCKET_NAME}|${R2_BUCKET_NAME}|g" "$CONFIG_FILE"
           sed -i "s|\${PROJECT_LINK}|${PROJECT_LINK}|g" "$CONFIG_FILE"
           sed -i "s|\${ANALYSIS_CACHE}|${ANALYSIS_CACHE}|g" "$CONFIG_FILE"
@@ -211,16 +230,83 @@ jobs:
         working-directory: ./mail-worker
         run: |
           echo "🚀 Starting deployment..."
-          pnpm wrangler deploy -c wrangler-action.toml 2>&1 \
-            | tee deploy.log \
-            | grep -v "https://.*\.workers\.dev" \
-            | sed -E 's/env\.domain .*/env.domain (***)/' \
-            || true
 
-          DEPLOY_EXIT_CODE=${PIPESTATUS[0]}
-          if [ $DEPLOY_EXIT_CODE -ne 0 ]; then
+          MAX_ATTEMPTS=4
+          ATTEMPT=1
+
+          deploy_once() {
+            pnpm wrangler deploy -c wrangler-action.toml > raw-deploy.log 2>&1
+            CODE=$?
+            # 输出脱敏后的日志（隐藏 workers.dev 地址与域名列表）
+            grep -v "https://.*\.workers\.dev" raw-deploy.log \
+              | sed -E 's/env\.domain .*/env.domain (***)/' \
+              | sed -E 's/env\.jwt_secret .*/env.jwt_secret (***)/' \
+              || true
+            cp raw-deploy.log deploy.log
+            return $CODE
+          }
+
+          while : ; do
+            if deploy_once; then
+              DEPLOY_EXIT_CODE=0
+            else
+              DEPLOY_EXIT_CODE=$?
+            fi
+
+            if [ $DEPLOY_EXIT_CODE -eq 0 ]; then
+              echo "✅ 第 ${ATTEMPT} 次部署成功"
+              break
+            fi
+
+            # Cloudflare 侧 binding 生成接口的内部错误（10021）：退避重试
+            if grep -qE "failed to generate|\[code: 10021\]" raw-deploy.log; then
+              if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+                case $ATTEMPT in
+                  1) WAIT=15 ;;
+                  2) WAIT=45 ;;
+                  *) WAIT=90 ;;
+                esac
+                ATTEMPT=$((ATTEMPT + 1))
+                echo "::warning::Cloudflare 返回 binding 生成错误（10021），${WAIT} 秒后重试（第 ${ATTEMPT}/${MAX_ATTEMPTS} 次）"
+                sleep $WAIT
+                continue
+              fi
+
+              # 重试用尽 → 去掉 [ai] 再部署一次，保证代码能上线
+              if [ "$AI_FAILOVER" != "false" ] && [ "$AI_BINDING" != "false" ]; then
+                echo "::warning::连续 ${MAX_ATTEMPTS} 次撞上 10021，改为不带 [ai] 绑定部署（本次部署后 AI 邮件分析 / 验证码提取不可用，下次成功生成绑定后自动恢复）"
+                sed -i '/^\[ai\]/,/^$/d' wrangler-action.toml
+
+                if deploy_once; then
+                  DEPLOY_EXIT_CODE=0
+                else
+                  DEPLOY_EXIT_CODE=$?
+                fi
+
+                if [ $DEPLOY_EXIT_CODE -eq 0 ]; then
+                  {
+                    echo "### ⚠️ 本次部署跳过了 Workers AI 绑定"
+                    echo ""
+                    echo "Cloudflare 的 binding 生成接口连续 ${MAX_ATTEMPTS} 次返回 \`10021\`，为了让代码先上线，最后一次部署去掉了 \`[ai]\`。"
+                    echo ""
+                    echo "- 影响：AI 邮件分析、验证码自动提取暂不可用（不影响收发信）"
+                    echo "- 恢复：下次部署若绑定生成成功，\`[ai]\` 会自动加回；也可以立即 Run workflow 重试一次"
+                    echo "- 不想再自动降级：把变量 \`AI_FAILOVER\` 设为 \`false\`"
+                  } >> $GITHUB_STEP_SUMMARY
+                  echo "✅ 已在不带 [ai] 绑定的情况下完成部署"
+                  break
+                fi
+                echo "❌ 去掉 [ai] 后部署依然失败，退出码 ${DEPLOY_EXIT_CODE}"
+                exit 1
+              fi
+
+              echo "❌ 部署失败：Cloudflare binding 生成错误 10021（已重试 ${MAX_ATTEMPTS} 次）"
+              exit 1
+            fi
+
+            echo "❌ 部署失败（第 ${ATTEMPT} 次），退出码 ${DEPLOY_EXIT_CODE}"
             exit 1
-          fi
+          done
 
           WORKER_URL=$(grep -o "https://.*\.workers\.dev" deploy.log || echo "")
 
@@ -231,28 +317,85 @@ jobs:
           echo "worker_url=$WORKER_URL" >> $GITHUB_OUTPUT
           echo "✅ Setup completed."
 
+      - name: 🔐 写入 JWT 密钥 / Put JWT secret
+        id: secret
+        working-directory: ./mail-worker
+        run: |
+          echo "🔐 Uploading jwt_secret as an encrypted secret..."
+
+          MAX_ATTEMPTS=3
+          ATTEMPT=1
+
+          while : ; do
+            # 值从 stdin 传入，不会出现在命令行/日志里
+            set +e
+            printf '%s' "$JWT_SECRET" \
+              | pnpm wrangler secret put jwt_secret -c wrangler-action.toml > secret-put.log 2>&1
+            CODE=$?
+            set -e
+
+            grep -v "env\." secret-put.log || true
+
+            if [ $CODE -eq 0 ]; then
+              rm -f secret-put.log
+              echo "✅ jwt_secret 已写入为加密 secret（控制台不可读回，源值以 GitHub 上的 JWT_SECRET 为准）"
+              exit 0
+            fi
+
+            if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+              ATTEMPT=$((ATTEMPT + 1))
+              echo "::warning::写入 jwt_secret 失败（退出码 ${CODE}），10 秒后重试（第 ${ATTEMPT}/${MAX_ATTEMPTS} 次）"
+              sleep 10
+              continue
+            fi
+
+            rm -f secret-put.log
+            echo "❌ 写入 jwt_secret 失败（已重试 ${MAX_ATTEMPTS} 次），退出码 ${CODE}"
+            echo "::error::密码未写入时站点无法签发/校验登录态，请检查 CLOUDFLARE_API_TOKEN 是否有 Workers Scripts:Edit 权限"
+            exit 1
+          done
+
       - name: ♻️ 初始化数据库 / Initialize database
         run: |
           echo "🛠️ Starting database initialization..."
           sleep 15
 
-          WORKER_URL="${CUSTOM_DOMAIN:+https://$CUSTOM_DOMAIN}"
-          WORKER_URL="${WORKER_URL:-${{ steps.deploy.outputs.worker_url }}}"
-
-          if [ -z "$WORKER_URL" ]; then
-            echo "❌ Preview URL not available. Please set CUSTOM_DOMAIN."
-            exit 1
+          CANDIDATES=""
+          if [ -n "$CUSTOM_DOMAIN" ]; then
+            CANDIDATES="https://$CUSTOM_DOMAIN"
+          fi
+          WORKER_URL="${{ steps.deploy.outputs.worker_url }}"
+          if [ -n "$WORKER_URL" ]; then
+            CANDIDATES="$CANDIDATES $WORKER_URL"
           fi
 
-          HTTP_CODE=$(curl -sL -w "%{http_code}" -o response.txt "$WORKER_URL/api/init/${JWT_SECRET}")
-          RESPONSE_BODY=$(cat response.txt)
-
-          if [ "$RESPONSE_BODY" = "success" ]; then
-            echo "✅ Setup completed."
-          else
-            echo "❌ Failed. HTTP: $HTTP_CODE, Response: $RESPONSE_BODY"
-            exit 1
+          if [ -z "$CANDIDATES" ]; then
+            echo "::warning::拿不到可用站点地址（CUSTOM_DOMAIN 与 workers.dev 都为空），跳过初始化。"
+            exit 0
           fi
+
+          for BASE in $CANDIDATES; do
+            echo "🔗 尝试 $BASE/api/init/***"
+            HTTP_CODE=$(curl -sL -m 30 -w "%{http_code}" -o response.txt "$BASE/api/init/${JWT_SECRET}" || echo "000")
+            RESPONSE_BODY=$(cat response.txt 2>/dev/null || true)
+
+            if [ "$RESPONSE_BODY" = "success" ]; then
+              echo "✅ Setup completed. ($BASE)"
+              exit 0
+            fi
+
+            echo "   ↳ HTTP $HTTP_CODE，响应：$(echo "$RESPONSE_BODY" | head -c 120)"
+          done
+
+          {
+            echo "### ⚠️ 数据库自动初始化未成功"
+            echo ""
+            echo "访问 \`CUSTOM_DOMAIN/api/init/<jwt_secret>\` 没有返回 \`success\`，通常是 **\`CUSTOM_DOMAIN\` 并不是这个 Worker 的访问域名**（返回的是别的站点页面）。"
+            echo ""
+            echo "处理方式：把 \`CUSTOM_DOMAIN\` 改成 Worker 实际对外域名后重跑；或手动打开 \`https://你的域名/api/init/你的jwt_secret\`，看到 \`success\` 即完成。"
+            echo "该接口是幂等的，只会补建缺失的表，不会覆盖已有数据。"
+          } >> $GITHUB_STEP_SUMMARY
+          echo "::warning::数据库自动初始化未成功，详见上图；部署本身已成功。"
 
       - name: 🗑️ 删除运行记录 / Delete workflow runs
         uses: GitRML/delete-workflow-runs@main
